@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Chat en salas</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eef1f6;--panel:#fff;--ink:#1b2440;--muted:#6b7491;--accent:#3b5bff;--onaccent:#fff;--other:#e3e8f2;--line:#d5dbe8}
+@media (prefers-color-scheme:dark){:root{--bg:#10131f;--panel:#171c2d;--ink:#e8ecf8;--muted:#8d97b5;--accent:#7b93ff;--onaccent:#0e1228;--other:#232a42;--line:#2a3150}}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{font-family:"Bricolage Grotesque",system-ui,sans-serif;background:var(--bg);color:var(--ink);display:flex;justify-content:center}
+.app{width:100%;max-width:680px;height:100%;display:flex;flex-direction:column;background:var(--panel);border-inline:1px solid var(--line)}
+header{padding:calc(14px + env(safe-area-inset-top,0px)) 18px 12px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:12px}
+header h1{font-size:1.25rem;font-weight:800;margin:0;letter-spacing:-.02em;flex:1}
+#status{font-size:.8rem;color:var(--muted)}
+button,input{font:inherit;color:inherit}
+button{cursor:pointer;border:0;border-radius:10px;padding:9px 14px;background:var(--accent);color:var(--onaccent);font-weight:600}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+input{border:1px solid var(--line);background:var(--bg);border-radius:10px;padding:10px 12px;width:100%}
+#join{padding:28px 22px;display:flex;flex-direction:column;gap:12px;max-width:420px;margin:auto 0;align-self:center;width:100%}
+#join p{margin:0;color:var(--muted);line-height:1.4}
+#chat{display:none;flex:1;min-height:0;flex-direction:column}
+#log{flex:1;overflow-y:auto;padding:16px 18px;display:flex;flex-direction:column;gap:6px}
+.m{max-width:80%;padding:8px 12px;border-radius:14px;background:var(--other);overflow-wrap:anywhere;line-height:1.35}
+.m.me{align-self:flex-end;background:var(--accent);color:var(--onaccent)}
+.m b{display:block;font-size:.75rem;opacity:.75;font-weight:600;margin-bottom:2px}
+.sys{align-self:center;font-size:.8rem;color:var(--muted);padding:4px 0}
+form{display:flex;gap:8px;padding:12px 18px calc(12px + env(safe-area-inset-bottom,0px));border-top:1px solid var(--line)}
+</style>
+</head>
+<body>
+<div class="app">
+  <header>
+    <h1 id="title">Chat en salas</h1>
+    <span id="status"></span>
+    <button class="ghost" id="copy" hidden>Copiar enlace</button>
+  </header>
+
+  <div id="join">
+    <p>Elige un nombre y una sala. Quien entre con el mismo nombre de sala (o el mismo enlace) chateará contigo.</p>
+    <input id="nick" placeholder="Tu nombre" maxlength="20" autocomplete="nickname">
+    <input id="room" placeholder="Nombre de la sala" maxlength="30" autocomplete="off">
+    <button id="go">Entrar a la sala</button>
+  </div>
+
+  <div id="chat">
+    <div id="log" aria-live="polite"></div>
+    <form id="form">
+      <input id="msg" placeholder="Escribe un mensaje" autocomplete="off" maxlength="500">
+      <button>Enviar</button>
+    </form>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>
+const $ = id => document.getElementById(id);
+let nick = "", room = "", peer = null, isHost = false;
+let hostConn = null;            // invitado → anfitrión
+const guests = new Set();       // anfitrión → invitados
+const history = [];             // últimos mensajes (los guarda el anfitrión)
+
+try { $("nick").value = localStorage.getItem("nick") || ""; } catch (e) {}
+$("room").value = decodeURIComponent(location.hash.slice(1));
+
+const slug = s => s.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+const setStatus = t => $("status").textContent = t;
+
+function addMsg(m) {
+  const log = $("log"), el = document.createElement("div");
+  if (m.sys) { el.className = "sys"; el.textContent = m.text; }
+  else {
+    el.className = "m" + (m.from === nick ? " me" : "");
+    const b = document.createElement("b"); b.textContent = m.from;
+    el.append(b, document.createTextNode(m.text));
+  }
+  log.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+}
+
+function broadcast(m, except) {
+  guests.forEach(c => { if (c !== except && c.open) c.send(m); });
+}
+
+function receive(m, from) {
+  if (isHost) {
+    if (!m.sys) { history.push(m); if (history.length > 100) history.shift(); }
+    broadcast(m, from);
+  }
+  addMsg(m);
+}
+
+function start() {
+  nick = $("nick").value.trim();
+  room = slug($("room").value);
+  if (!nick || !room) { alert("Escribe tu nombre y el nombre de la sala."); return; }
+  try { localStorage.setItem("nick", nick); } catch (e) {}
+  location.hash = encodeURIComponent(room);
+  $("join").style.display = "none";
+  $("chat").style.display = "flex";
+  $("copy").hidden = false;
+  $("title").textContent = "# " + room;
+  setStatus("Conectando…");
+  becomeHost();
+}
+
+function becomeHost() {
+  peer = new Peer("chatgh-" + room);
+  peer.on("open", () => {
+    isHost = true;
+    setStatus("Eres el anfitrión");
+    addMsg({ sys: true, text: "Sala creada. Comparte el enlace para invitar a más gente." });
+  });
+  peer.on("connection", c => {
+    c.on("open", () => {
+      guests.add(c);
+      history.forEach(m => c.send(m));
+      const s = { sys: true, text: "Alguien se ha unido a la sala." };
+      broadcast(s, c); addMsg(s);
+      setStatus("Anfitrión · " + (guests.size + 1) + " en la sala");
+    });
+    c.on("data", m => receive(m, c));
+    c.on("close", () => {
+      guests.delete(c);
+      const s = { sys: true, text: "Alguien salió de la sala." };
+      broadcast(s); addMsg(s);
+      setStatus("Anfitrión · " + (guests.size + 1) + " en la sala");
+    });
+  });
+  peer.on("error", err => {
+    if (err.type === "unavailable-id") { peer.destroy(); joinAsGuest(); }
+    else setStatus("Error de conexión: " + err.type);
+  });
+}
+
+function joinAsGuest() {
+  peer = new Peer();
+  peer.on("open", () => {
+    hostConn = peer.connect("chatgh-" + room, { reliable: true });
+    hostConn.on("open", () => { setStatus("Conectado"); addMsg({ sys: true, text: "Te has unido a la sala." }); });
+    hostConn.on("data", m => addMsg(m));
+    hostConn.on("close", () => { setStatus("Desconectado"); addMsg({ sys: true, text: "El anfitrión cerró la sala. Recarga para crear una nueva." }); });
+  });
+  peer.on("error", err => setStatus("Error de conexión: " + err.type));
+}
+
+function send(text) {
+  const m = { from: nick, text };
+  if (isHost) receive(m); else if (hostConn && hostConn.open) { hostConn.send(m); addMsg(m); }
+}
+
+$("go").onclick = start;
+$("room").addEventListener("keydown", e => { if (e.key === "Enter") start(); });
+$("form").addEventListener("submit", e => {
+  e.preventDefault();
+  const t = $("msg").value.trim();
+  if (t) send(t);
+  $("msg").value = "";
+});
+$("copy").onclick = async () => {
+  try { await navigator.clipboard.writeText(location.href); $("copy").textContent = "Enlace copiado"; }
+  catch (e) { prompt("Copia este enlace:", location.href); }
+  setTimeout(() => $("copy").textContent = "Copiar enlace", 1800);
+};
+</script>
+</body>
+</html>
